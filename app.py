@@ -28,7 +28,7 @@ face_mesh = mp_face_mesh.FaceMesh(
 
 # Cheeks and forehead indices for stable arterial signal capture
 SKIN_REGIONS = {
-    "cheeks": [234, 93, 132, 58, 172, 136, 150, 454, 323, 361, 288, 397, 365, 379]
+    "forehead": [10, 109, 67, 103, 54, 21, 71, 68, 104, 69, 108, 151, 337, 299, 333, 298, 301, 251, 284, 332, 297, 338]
 }
 
 def get_segmented_mask(frame_shape, landmarks):
