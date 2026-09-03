@@ -337,7 +337,7 @@ class RPPGVideoProcessor(VideoProcessorBase):
             self.rr_history.clear(); self.spo2_history.clear(); self.bpm_all.clear()
             self.bpmBuffer[:] = np.nan
 
-        # Construct the composite canvas
+        # Construct the composite dashboard canvas
         canvas = np.full((CANVAS_H, CANVAS_W, 3), BG_COLOR, dtype=np.uint8)
         pulse_display = display_metric_value(face_detected_now, vitals_enabled, self.current_hr)
         rr_display = display_metric_value(face_detected_now, vitals_enabled, self.current_rr)
@@ -351,35 +351,27 @@ class RPPGVideoProcessor(VideoProcessorBase):
         self.bufferIndex = (self.bufferIndex + 1) % self.bufferSize
         return av.VideoFrame.from_ndarray(canvas, format="bgr24")
 
-# --- Streamlit Layout ---
+# --- UI Controls & Sidebar ---
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    st.caption("Settings & Pipeline Controls")
+    
+    st.markdown("**Session Setup**")
+    st.info("💡 For optimal estimation accuracy, position your face in even lighting and maintain steady posture.")
+    
+    st.divider()
+    st.markdown("**Pipeline Information**")
+    st.markdown("- **Extraction Method:** Plane-Orthogonal-to-Skin (POS)")
+    st.markdown("- **Target Bandwidth:** 0.7 - 3.0 Hz (42 - 180 BPM)")
+    st.markdown("- **ROI:** Facial Mesh Segmented Mask")
+
+# --- Main Dashboard ---
 st.title("💓 Contactless Vitals Dashboard")
-st.caption("Real-time optical heart rate, respiration rate, and SpO2 estimation via ambient facial video streams.")
+st.markdown("Real-time optical heart rate monitoring via ambient facial video streams.")
 
 st.divider()
 
-# Information placed on the left [3], Video Stream placed on the right [7]
-col_info, col_stream = st.columns([3, 7], gap="large")
-
-with col_info:
-    st.subheader("Status & Guide")
-    
-    with st.container(border=True):
-        st.markdown("### 📋 Instructions")
-        st.markdown(
-            "1. **Allow Camera Access**: Click **START** and grant webcam permissions.\n"
-            "2. **Align Face**: Keep your face centered inside the yellow ROI box.\n"
-            "3. **Hold Steady**: Signal calibration requires **5 seconds** of steady face detection."
-        )
-
-    with st.container(border=True):
-        st.markdown("### ⚙️ Pipeline Info")
-        st.markdown("- **Algorithm:** Plane-Orthogonal-to-Skin (POS)")
-        st.markdown("- **Cardiac Band:** 0.7 – 3.0 Hz (42 – 180 BPM)")
-        st.markdown("- **Respiration Band:** 0.15 – 0.5 Hz (9 – 30 BR/MIN)")
-        st.markdown("- **Target Region:** Forehead & Cheek Mesh")
-
-    with st.container(border=True):
-        st.caption("ℹ️ Live vital signs update directly inside the cards on the stream feed.")
+col_stream, col_metrics = st.columns([7, 3], gap="medium")
 
 with col_stream:
     st.subheader("Live Feed")
@@ -389,3 +381,17 @@ with col_stream:
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         media_stream_constraints={"video": True, "audio": False}
     )
+
+with col_metrics:
+    st.subheader("Status & Readings")
+    
+    with st.container(border=True):
+        st.markdown("**Monitoring Guide**")
+        st.markdown(
+            "1. Allow camera access when prompted.\n"
+            "2. Ensure your forehead and cheeks remain visible.\n"
+            "3. The reading will stabilize within ~5-10 seconds."
+        )
+
+    with st.container(border=True):
+        st.caption("ℹ️ Signal processing buffers fill dynamically once face localization locks onto the region.")
