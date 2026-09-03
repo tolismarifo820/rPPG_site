@@ -351,22 +351,14 @@ class RPPGVideoProcessor(VideoProcessorBase):
         self.bufferIndex = (self.bufferIndex + 1) % self.bufferSize
         return av.VideoFrame.from_ndarray(canvas, format="bgr24")
 
-# --- Streamlit Presentation & Two-Column Layout ---
+# --- Streamlit Layout ---
 st.title("💓 Contactless Vitals Dashboard")
-st.markdown("Real-time optical heart rate, respiration rate, and SpO2 estimation via ambient facial video streams.")
+st.caption("Real-time optical heart rate, respiration rate, and SpO2 estimation via ambient facial video streams.")
 
 st.divider()
 
-col_stream, col_info = st.columns([7, 3], gap="large")
-
-with col_stream:
-    st.subheader("Live Feed")
-    webrtc_streamer(
-        key="rppg-stream",
-        video_processor_factory=RPPGVideoProcessor,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        media_stream_constraints={"video": True, "audio": False}
-    )
+# Information placed on the left [3], Video Stream placed on the right [7]
+col_info, col_stream = st.columns([3, 7], gap="large")
 
 with col_info:
     st.subheader("Status & Guide")
@@ -374,9 +366,9 @@ with col_info:
     with st.container(border=True):
         st.markdown("### 📋 Instructions")
         st.markdown(
-            "1. **Allow Camera Access**: Click **START** and permit webcam permissions.\n"
+            "1. **Allow Camera Access**: Click **START** and grant webcam permissions.\n"
             "2. **Align Face**: Keep your face centered inside the yellow ROI box.\n"
-            "3. **Hold Steady**: Signal calibration requires **5 seconds** of continuous face detection."
+            "3. **Hold Steady**: Signal calibration requires **5 seconds** of steady face detection."
         )
 
     with st.container(border=True):
@@ -387,4 +379,13 @@ with col_info:
         st.markdown("- **Target Region:** Forehead & Cheek Mesh")
 
     with st.container(border=True):
-        st.caption("ℹ️ Measurements update in real time directly on the cards within the video stream.")
+        st.caption("ℹ️ Live vital signs update directly inside the cards on the stream feed.")
+
+with col_stream:
+    st.subheader("Live Feed")
+    webrtc_streamer(
+        key="rppg-stream",
+        video_processor_factory=RPPGVideoProcessor,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        media_stream_constraints={"video": True, "audio": False}
+    )
