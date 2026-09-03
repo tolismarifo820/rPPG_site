@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#0ea5e9"                # Calm cyan/blue instead of stark red
+backgroundColor = "#0f172a"             # Deep slate dark mode
+secondaryBackgroundColor = "#1e293b"    # Soft navy for cards/sidebars
+textColor = "#f8fafc"                   # Crisp, high-contrast readable text
+font = "sans serif"
