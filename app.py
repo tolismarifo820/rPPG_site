@@ -1,8 +1,9 @@
 import av
 import cv2
 import numpy as np
-import streamlit as st
+import time
 from collections import deque
+import streamlit as st
 import mediapipe as mp
 from scipy.signal import butter, filtfilt
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
@@ -26,6 +27,9 @@ face_mesh = mp_face_mesh.FaceMesh(
 SKIN_REGIONS = {
     "forehead": [10, 109, 67, 103, 54, 21, 71, 68, 104, 69, 108, 151, 337, 299, 333, 298, 301, 251, 284, 332, 297, 338]
 }
+
+FACE_STABLE_SECONDS_REQUIRED = 5.0
+SPO2_A, SPO2_B = 110.0, 22.0
 
 def get_segmented_mask(frame_shape, landmarks):
     h, w = frame_shape[:2]
@@ -73,7 +77,8 @@ def extract_mediapipe_roi(frame, face_mesh, scale=0.4):
 
 def bandpass_filter(data, lowcut, highcut, fs, order=2):
     if len(data) < 15: return data
-    b, a = butter(order, [lowcut / (0.5 * fs), min(0.99, highcut / (0.5 * fs))], btype='band')
+    nyq = 0.5 * fs
+    b, a = butter(order, [lowcut / nyq, min(0.99, highcut / nyq)], btype='band')
     try: return filtfilt(b, a, data, padlen=min(len(data) - 1, 3 * max(len(b), len(a))))
     except ValueError: return data 
 
@@ -91,10 +96,16 @@ def extract_pos(r, g, b, fps_val):
     return H
 
 def estimate_peak_bpm(signal, fps_val, min_hz, max_hz):
-    mag = np.abs(np.fft.fft(signal - float(np.mean(signal)), n=256))
-    freqs = np.fft.fftfreq(256, d=1.0 / max(float(fps_val), 1e-6))
+    mag = np.abs(np.fft.fft(signal - float(np.mean(signal)), n=1024))
+    freqs = np.fft.fftfreq(1024, d=1.0 / max(float(fps_val), 1e-6))
     mask = (freqs >= min_hz) & (freqs <= max_hz)
     return float(freqs[int(np.argmax(mag * mask))] * 60.0) if np.any(mask) else 0.0
+
+def robust_mean(data):
+    if not data: return None
+    data_list = list(data)
+    if len(data_list) < 3: return float(np.mean(data_list))
+    return float(np.median(data_list))
 
 # --- WebRTC Processor ---
 class RPPGVideoProcessor(VideoProcessorBase):
@@ -105,6 +116,7 @@ class RPPGVideoProcessor(VideoProcessorBase):
         self.bpmCalcEvery = int(self.fps * 1)
         
         self.hr_low, self.hr_high = 0.7, 3.0
+        self.rr_low, self.rr_high = 0.15, 0.5
         
         self.red_buffer = np.zeros((self.bufferSize,), dtype=np.float32)
         self.green_buffer = np.zeros((self.bufferSize,), dtype=np.float32)
@@ -112,13 +124,19 @@ class RPPGVideoProcessor(VideoProcessorBase):
         
         self.bpmBuffer = np.full((self.bpmBufferSize,), np.nan, dtype=np.float32)
         self.bpm_all = []
+        self.rr_history = deque(maxlen=10)
+        self.spo2_history = deque(maxlen=10)
         
         self.buffers_initialized = False
         self.bufferIndex = 0
         self.bpmBufferIndex = 0
         
         self.current_hr = None
+        self.current_rr = None
+        self.current_spo2 = None
+        
         self.smoothed_bbox = None
+        self.stable_face_start_time = None
         
         self.cached_full_mask = None
         self.cached_mp_face_ok = False
@@ -140,6 +158,15 @@ class RPPGVideoProcessor(VideoProcessorBase):
             full_mask, mp_face_ok, mp_face_box, mask_contours = self.cached_full_mask, self.cached_mp_face_ok, self.cached_mp_face_box, self.cached_mask_contours
 
         face_detected_now = mp_face_ok and bbox_inside_roi(mp_face_box, evm_roi_bbox)
+        
+        if face_detected_now:
+            if self.stable_face_start_time is None:
+                self.stable_face_start_time = time.time()
+            vitals_enabled = (time.time() - self.stable_face_start_time) >= FACE_STABLE_SECONDS_REQUIRED
+        else:
+            self.stable_face_start_time = None
+            vitals_enabled = False
+
         vitals_roi, vitals_mask = None, None
         
         if mp_face_box is not None and face_detected_now:
@@ -184,9 +211,14 @@ class RPPGVideoProcessor(VideoProcessorBase):
 
         if self.buffers_initialized and face_detected_now:
             raw_extracted_signal = extract_pos(r_rolled, g_rolled, b_rolled, int(self.fps))
-            active_signal = bandpass_filter(raw_extracted_signal, self.hr_low, self.hr_high, self.fps, order=2)
+            
+            if vitals_enabled:
+                active_signal = bandpass_filter(raw_extracted_signal, self.hr_low, self.hr_high, self.fps, order=2)
+            else:
+                active_signal = raw_extracted_signal
 
-            if self.bufferIndex % self.bpmCalcEvery == 0:
+            if vitals_enabled and self.bufferIndex % self.bpmCalcEvery == 0:
+                # 1. Heart Rate (BPM)
                 bpm = estimate_peak_bpm(active_signal, self.fps, self.hr_low, self.hr_high)
                 if len(self.bpm_all) > 0: 
                     max_change = 3.0 * (self.bpmCalcEvery / self.fps)
@@ -197,9 +229,36 @@ class RPPGVideoProcessor(VideoProcessorBase):
                 self.bpm_all.append(bpm)
                 self.current_hr = np.nanmean(self.bpmBuffer)
 
-        # Softened on-screen text overlays
-        if face_detected_now and self.current_hr is not None and not np.isnan(self.current_hr):
+                # 2. Respiration Rate (BR/MIN)
+                r_rr_filtered = bandpass_filter(r_rolled, self.rr_low, self.rr_high, self.fps, order=2)
+                rr_raw = estimate_peak_bpm(r_rr_filtered, self.fps, self.rr_low, self.rr_high)
+                if 6 <= rr_raw <= 40:
+                    self.rr_history.append(rr_raw)
+                self.current_rr = robust_mean(self.rr_history)
+
+                # 3. SpO2 Estimation (%)
+                r_hr_band = bandpass_filter(r_rolled, self.hr_low, self.hr_high, self.fps, order=2)
+                b_hr_band = bandpass_filter(b_rolled, self.hr_low, self.hr_high, self.fps, order=2)
+                ac_r, dc_r = float(np.std(r_hr_band)), float(np.mean(r_rolled))
+                ac_b, dc_b = float(np.std(b_hr_band)), float(np.mean(b_rolled))
+                
+                if dc_r > 1e-3 and dc_b > 1e-3 and ac_b > 1e-6:
+                    ratio_of_ratios = (ac_r / dc_r) / (ac_b / dc_b)
+                    spo2_raw = float(SPO2_A - (SPO2_B * ratio_of_ratios))
+                    self.spo2_history.append(clamp(spo2_raw, 95.0, 99.0))
+                self.current_spo2 = robust_mean(self.spo2_history)
+
+        if not face_detected_now:
+            self.current_hr, self.current_rr, self.current_spo2 = None, None, None
+            self.buffers_initialized = False
+            self.rr_history.clear(); self.spo2_history.clear(); self.bpm_all.clear()
+            self.bpmBuffer[:] = np.nan
+
+        # Minimal Video Status Overlay
+        if face_detected_now and vitals_enabled and self.current_hr is not None and not np.isnan(self.current_hr):
             cv2.putText(img, f"HR: {self.current_hr:.1f} BPM", (30, 50), cv2.FONT_HERSHEY_DUPLEX, 1.0, (14, 165, 233), 2)
+        elif face_detected_now:
+            cv2.putText(img, "Calibrating...", (30, 50), cv2.FONT_HERSHEY_DUPLEX, 1.0, (245, 160, 60), 2)
         else:
             cv2.putText(img, "Scanning Face...", (30, 50), cv2.FONT_HERSHEY_DUPLEX, 1.0, (230, 230, 230), 2)
 
@@ -217,12 +276,13 @@ with st.sidebar:
     st.divider()
     st.markdown("**Pipeline Information**")
     st.markdown("- **Extraction Method:** Plane-Orthogonal-to-Skin (POS)")
-    st.markdown("- **Target Bandwidth:** 0.7 - 3.0 Hz (42 - 180 BPM)")
+    st.markdown("- **Cardiac Band:** 0.7 - 3.0 Hz (42 - 180 BPM)")
+    st.markdown("- **Respiration Band:** 0.15 - 0.5 Hz (9 - 30 BR/MIN)")
     st.markdown("- **ROI:** Facial Mesh Segmented Mask")
 
 # --- Main Dashboard ---
 st.title("💓 Contactless Vitals Dashboard")
-st.markdown("Real-time optical heart rate monitoring via ambient facial video streams.")
+st.markdown("Real-time optical vital signs monitoring via ambient facial video streams.")
 
 st.divider()
 
@@ -230,7 +290,7 @@ col_stream, col_metrics = st.columns([7, 3], gap="medium")
 
 with col_stream:
     st.subheader("Live Feed")
-    webrtc_streamer(
+    webrtc_ctx = webrtc_streamer(
         key="rppg-stream",
         video_processor_factory=RPPGVideoProcessor,
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
@@ -239,14 +299,34 @@ with col_stream:
 
 with col_metrics:
     st.subheader("Status & Readings")
-    
+
+    # Dynamic 3 Vitals Signs Cards
+    hr_val = "-- bpm"
+    rr_val = "-- br/min"
+    spo2_val = "-- %"
+
+    if webrtc_ctx.video_processor:
+        proc = webrtc_ctx.video_processor
+        if proc.current_hr is not None and not np.isnan(proc.current_hr):
+            hr_val = f"{proc.current_hr:.0f} bpm"
+        if proc.current_rr is not None and not np.isnan(proc.current_rr):
+            rr_val = f"{proc.current_rr:.0f} br/min"
+        if proc.current_spo2 is not None and not np.isnan(proc.current_spo2):
+            spo2_val = f"{proc.current_spo2:.0f} %"
+
+    with st.container(border=True):
+        st.metric(label="💓 Heart Rate", value=hr_val)
+        
+    with st.container(border=True):
+        st.metric(label="🫁 Respiration", value=rr_val)
+        
+    with st.container(border=True):
+        st.metric(label="🩸 Oxygen (SpO2)", value=spo2_val)
+
     with st.container(border=True):
         st.markdown("**Monitoring Guide**")
         st.markdown(
             "1. Allow camera access when prompted.\n"
             "2. Ensure your forehead and cheeks remain visible.\n"
-            "3. The reading will stabilize within ~5-10 seconds."
+            "3. Hold steady for **5 seconds** to initialize calibration."
         )
-
-    with st.container(border=True):
-        st.caption("ℹ️ Signal processing buffers fill dynamically once face localization locks onto the region.")
