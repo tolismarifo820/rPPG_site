@@ -8,7 +8,7 @@ from scipy.signal import butter, filtfilt
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
-# --- Streamlit Page Setup ---
+# --- Streamlit Page Configuration ---
 st.set_page_config(
     page_title="Contactless Vitals Dashboard",
     page_icon="💓",
@@ -22,7 +22,7 @@ BOX_BR = (30, 180, 240, 130)
 BOX_SPO2 = (30, 330, 240, 130)
 BOX_CAMERA = (300, 30, 540, 460)
 
-# Colors (BGR)
+# Colors (BGR format)
 BG_COLOR = (18, 18, 22)
 CARD_COLOR = (30, 30, 38)
 BORDER_COLOR = (55, 55, 68)
@@ -337,7 +337,7 @@ class RPPGVideoProcessor(VideoProcessorBase):
             self.rr_history.clear(); self.spo2_history.clear(); self.bpm_all.clear()
             self.bpmBuffer[:] = np.nan
 
-        # Construct the composite dashboard canvas
+        # Construct the composite canvas
         canvas = np.full((CANVAS_H, CANVAS_W, 3), BG_COLOR, dtype=np.uint8)
         pulse_display = display_metric_value(face_detected_now, vitals_enabled, self.current_hr)
         rr_display = display_metric_value(face_detected_now, vitals_enabled, self.current_rr)
@@ -351,19 +351,40 @@ class RPPGVideoProcessor(VideoProcessorBase):
         self.bufferIndex = (self.bufferIndex + 1) % self.bufferSize
         return av.VideoFrame.from_ndarray(canvas, format="bgr24")
 
-# --- Streamlit Presentation ---
-with st.sidebar:
-    st.header("⚙️ Device & Pipeline")
-    st.info("💡 Position your face inside the yellow alignment bounding box.")
-    st.markdown("- **Algorithm:** Plane-Orthogonal-to-Skin (POS)")
-    st.markdown("- **Metrics:** Heart Rate, Respiration Rate, SpO2")
-    st.markdown("- **Stabilization Time:** 5 seconds")
+# --- Streamlit Presentation & Two-Column Layout ---
+st.title("💓 Contactless Vitals Dashboard")
+st.markdown("Real-time optical heart rate, respiration rate, and SpO2 estimation via ambient facial video streams.")
 
-st.title("Contactless Vitals Dashboard")
+st.divider()
 
-webrtc_streamer(
-    key="rppg-stream",
-    video_processor_factory=RPPGVideoProcessor,
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    media_stream_constraints={"video": True, "audio": False}
-)
+col_stream, col_info = st.columns([7, 3], gap="large")
+
+with col_stream:
+    st.subheader("Live Feed")
+    webrtc_streamer(
+        key="rppg-stream",
+        video_processor_factory=RPPGVideoProcessor,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        media_stream_constraints={"video": True, "audio": False}
+    )
+
+with col_info:
+    st.subheader("Status & Guide")
+    
+    with st.container(border=True):
+        st.markdown("### 📋 Instructions")
+        st.markdown(
+            "1. **Allow Camera Access**: Click **START** and permit webcam permissions.\n"
+            "2. **Align Face**: Keep your face centered inside the yellow ROI box.\n"
+            "3. **Hold Steady**: Signal calibration requires **5 seconds** of continuous face detection."
+        )
+
+    with st.container(border=True):
+        st.markdown("### ⚙️ Pipeline Info")
+        st.markdown("- **Algorithm:** Plane-Orthogonal-to-Skin (POS)")
+        st.markdown("- **Cardiac Band:** 0.7 – 3.0 Hz (42 – 180 BPM)")
+        st.markdown("- **Respiration Band:** 0.15 – 0.5 Hz (9 – 30 BR/MIN)")
+        st.markdown("- **Target Region:** Forehead & Cheek Mesh")
+
+    with st.container(border=True):
+        st.caption("ℹ️ Measurements update in real time directly on the cards within the video stream.")
